@@ -1,0 +1,30 @@
+# Compiled CUDA / C++ artifacts
+*.o
+*.obj
+*.out
+a.out
+*.exe
+*.so
+*.a
+
+# nvcc / profiler intermediates
+*.ptx
+*.cubin
+*.fatbin
+*.i
+*.ii
+*.gpu
+
+# Profiler reports (Nsight)
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# Build dirs
+build/
+bin/
+
+# Editor / OS cruft
+.vscode/
+.DS_Store
