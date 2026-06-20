@@ -2,10 +2,15 @@
 #include <cstdlib>
 #include <cmath>
 
+//. this is for tiling to load from GMEM to SMEM 
 #define BM 64
 #define BN 64
 #define BK 8
+
+// note that this for each thread how much they computing -- to increase Arithmetci intensity
 #define TM 8
+#define TN 8
+
 #define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 #define CUDA_CHECK(call) do { \
     cudaError_t err = (call); \
@@ -22,24 +27,32 @@ __global__ void gemm_one_d_blocktiling(const float *A, const float *B, float *C,
         __shared__ float As[BM * BK];
         __shared__ float Bs[BK * BN];
         
-        const int numThreadsPerTile = BM * BN / TM;
-        
-        float dotprod[TM];
-        for (int k = 0; k < TM; k++) dotprod[k] = 0.0f; // this is for storing rows for each thread --   will increase artihmetic intensity (FLOPs/byte)
+        const int numThreadsPerTile = (BM * BN) / (TM * TN);
 
+        // for storing the output of partial summaions of outer products
+        float outerproduct[TM * TN] = {0.0};
+
+        // get the registers for doing outer product
+        float regM[TM] = {0.0};
+        float regN[TN] = {0.0};
+
+        unsigned threadrow = threadIdx.x / (BN / TN);
+        unsigned threadcol = threadIdx.x % (BN / TN);
+        
         // now loop over the phases (referring to pmpp terminlogy from chap 5)
         for (int p = 0; p < K/BK; p++) {
 
             // load the data for A from GMEM to SMEM
-            for (int k = threadIdx.x; k < BM*BK; k += numThreadsPerTile) {
+            for (int k = threadIdx.x; k < BM * BK; k += numThreadsPerTile) {
                 unsigned int Arow = blockIdx.x * BM + (k / BK);
                 unsigned int tilerow = k / BK;
                 unsigned int tilecol = k % BK;
-                As[tilerow * BK + tilecol] = A[Arow * K + (p * BK + tilecol)];
+                // load in reverse order
+                As[tilecol * BM + tilerow] = A[Arow * K + (p * BK + tilecol)];
             }    
 
             // load the data for B from GMEM to SMEM
-            for (int k = threadIdx.x; k < BK*BN; k += numThreadsPerTile) {
+            for (int k = threadIdx.x; k < BK * BN; k += numThreadsPerTile) {
                 unsigned int Bcol = blockIdx.y * BN + (k % BN);
                 unsigned int tilerow = k / BN;
                 unsigned int tilecol = k % BN;
@@ -47,25 +60,30 @@ __global__ void gemm_one_d_blocktiling(const float *A, const float *B, float *C,
             }
             __syncthreads();
 
-            // compute the dotproduct for the thread in the tile within the current phase
-            unsigned int tilerow = threadIdx.x / BN;
-            unsigned int tilecol = threadIdx.x % BN;
+            // compute the outerproducts for current thread
             for (int k = 0; k < BK; k++) {
-                float Btmp = Bs[(k * BN) + tilecol];
-                for (int j = 0; j < TM; j++) {
-                    dotprod[j] += As[(tilerow * TM + j) * BK + k] * Btmp;
-                    // dotprod[j] += As[k * BM + (tilerow * TM + j)] * Btmp; 
+                for (int i = 0; i < TM; i++) {
+                    regM[i] = As[k * BM + threadrow * TM + i];
+                }
+                for (int i = 0; i < TN; i++) {
+                    regN[i] = Bs[k * BN + threadcol * TN + i];
+                }
+                for (int i = 0; i < TM; i++) {
+                    for (int j = 0; j < TN; j++) {
+                        outerproduct[i * TN + j] += regM[i] * regN[j];
+                    }
                 }
             }
             __syncthreads();
 
         }
 
-        unsigned int Crow_start = (blockIdx.x * BM) + (threadIdx.x / BN) * TM;
-        unsigned int Ccol = (blockIdx.y * BN) + (threadIdx.x % BN);
-
-        for (unsigned int row = 0; row < TM; row++) {
-            C[(Crow_start + row) * N + Ccol] = alpha * dotprod[row] + beta * C[(Crow_start + row) * N + Ccol];
+        for (int i = 0; i < TM; i++) {
+            for (int j = 0; j < TN; j++) {
+                unsigned int Crow = blockIdx.x * BM + threadrow * TM + i;
+                unsigned int Ccol = blockIdx.y * BN + threadcol * TN + j;
+                C[Crow * N + Ccol] = alpha * outerproduct[i * TN + j] + beta * C[Crow * N + Ccol];
+            }
         }
         
     }
@@ -99,7 +117,7 @@ __global__ void gemm_one_d_blocktiling(const float *A, const float *B, float *C,
 
         // launch the kernel - warmup
         dim3 gridDim(CEIL_DIV(M, BM), CEIL_DIV(N, BN), 1); // gird sizing is done based on tile size, not block size
-        dim3 blockDim((BM * BN) / (TM));
+        dim3 blockDim((BM * BN) / (TM * TN));
         gemm_one_d_blocktiling<<<gridDim, blockDim>>>(dA, dB, dC, beta, alpha, M, N, K);
         CUDA_CHECK(cudaGetLastError()); 
         CUDA_CHECK(cudaDeviceSynchronize());
